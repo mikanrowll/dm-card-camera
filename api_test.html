@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>API試験</title>
+<style>
+  body{margin:0;padding:12px;font-family:-apple-system,"Hiragino Sans",sans-serif;background:#111;color:#eee}
+  h1{font-size:16px;margin:0 0 8px}
+  label{display:block;font-size:12px;color:#aaa;margin:8px 0 2px}
+  input{width:100%;box-sizing:border-box;padding:10px;font-size:15px;border-radius:6px;border:1px solid #444;background:#222;color:#eee}
+  .btns{display:flex;flex-direction:column;gap:8px;margin:12px 0}
+  button{padding:12px;font-size:15px;border:0;border-radius:8px;background:#2f6fed;color:#fff}
+  button.sub{background:#444}
+  button:disabled{opacity:.4}
+  pre{background:#000;border:1px solid #333;border-radius:6px;padding:8px;font-size:12px;white-space:pre-wrap;word-break:break-all;max-height:50vh;overflow:auto}
+  .ok{color:#6fe38a}.ng{color:#ff7b7b}
+  p.note{font-size:12px;color:#aaa}
+</style>
+</head>
+<body>
+<h1>API通信の確認(試験ページ)</h1>
+<p class="note">GASのURLとトークンは、このスマホのブラウザにだけ保存されます(リポジトリには入りません)。</p>
+<label>GASのウェブアプリURL(…/exec で終わるもの)</label>
+<input id="url" inputmode="url" autocapitalize="off" autocomplete="off" placeholder="https://script.google.com/macros/s/…/exec">
+<label>APIトークン</label>
+<input id="tok" type="password" autocapitalize="off" autocomplete="off">
+<div class="btns">
+  <button id="b1">① カード一覧を取得する</button>
+  <button id="b2">② +1 → 同じIDで再送 → −1(元に戻る)</button>
+  <button id="b3" class="sub">③ 誤ったトークンで拒否されるか</button>
+  <button id="b4" class="sub">ログをコピー</button>
+</div>
+<pre id="log"></pre>
+<script>
+(function () {
+  const $ = (id) => document.getElementById(id);
+  const logEl = $('log'), lines = [];
+  function log(m, cls) {
+    const t = new Date().toTimeString().slice(0, 8);
+    lines.push(t + ' ' + m);
+    const d = document.createElement('div'); if (cls) d.className = cls; d.textContent = t + ' ' + m;
+    logEl.appendChild(d); logEl.scrollTop = logEl.scrollHeight;
+  }
+  try { $('url').value = localStorage.getItem('gasUrl') || ''; $('tok').value = localStorage.getItem('gasTok') || ''; } catch (e) {}
+  function save() { try { localStorage.setItem('gasUrl', $('url').value.trim()); localStorage.setItem('gasTok', $('tok').value.trim()); } catch (e) {} }
+
+  const rid = () => 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // 通信失敗(電波など)や混雑のときは、同じリクエストIDのまま再送する(GAS側が二重加算を防ぐ)
+  async function call(op, args, opt) {
+    opt = opt || {};
+    const url = $('url').value.trim(), token = opt.token !== undefined ? opt.token : $('tok').value.trim();
+    const body = JSON.stringify({ token: token, op: op, args: args || {} });
+    let last;
+    for (let i = 0; i < 3; i++) {
+      try {
+        const t0 = performance.now();
+        const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: body, redirect: 'follow' });
+        const text = await res.text();
+        let j; try { j = JSON.parse(text); } catch (e) { throw new Error('JSONではない応答(HTTP ' + res.status + '): ' + text.slice(0, 120)); }
+        j._ms = Math.round(performance.now() - t0); j._bytes = text.length;
+        if (j.ok === false && j.code === 'busy' && i < 2) { last = new Error(j.error); await sleep(600 * (i + 1)); continue; }
+        return j;
+      } catch (e) {
+        last = e; if (i < 2) { log('通信エラー(' + e.message + ')→ 同じIDで再送します'); await sleep(800 * (i + 1)); }
+      }
+    }
+    throw last;
+  }
+
+  async function run(name, fn) {
+    save(); const bs = document.querySelectorAll('button'); bs.forEach((b) => b.disabled = true);
+    log('--- ' + name);
+    try { await fn(); } catch (e) { log('失敗: ' + e.name + ' / ' + e.message, 'ng'); log('→ URL・デプロイの公開範囲(全員)・最新バージョンへの更新を確認してください'); }
+    bs.forEach((b) => b.disabled = false);
+  }
+
+  $('b1').onclick = () => run('一覧取得', async () => {
+    const r = await call('getCards');
+    if (!r.ok) { log('拒否: ' + r.code + ' / ' + r.error, 'ng'); return; }
+    const d = r.data;
+    log('成功: ' + d.ids.length + '件 / ' + Math.round(r._bytes / 1024) + 'KB / ' + r._ms + 'ms', 'ok');
+    log('項目: ' + Object.keys(d).join(', '));
+    log('先頭: ' + d.ids[0] + ' ' + d.names[0] + ' コスト' + d.cost[0] + ' パワー' + d.power[0] + ' 所持' + d.own[0]);
+    window.__cards = d;
+  });
+
+  $('b2').onclick = () => run('二重加算の防止', async () => {
+    let r = await call('getCards'); if (!r.ok) { log('一覧の取得に失敗: ' + r.error, 'ng'); return; }
+    const d = r.data; const id = d.ids[0]; log('対象: ' + id + ' ' + d.names[0] + '(所持 ' + d.own[0] + ')');
+    const a = rid();
+    const r1 = await call('addDelta', { id: id, delta: 1, source: '試験', requestId: a });
+    log('1回目 +1: ' + JSON.stringify(r1.data || r1), r1.ok && !r1.data.duplicate ? 'ok' : 'ng');
+    const r2 = await call('addDelta', { id: id, delta: 1, source: '試験', requestId: a });
+    const dupOk = r2.ok && r2.data.duplicate === true && r2.data.after === r1.data.after;
+    log('同じIDで再送: ' + JSON.stringify(r2.data || r2), dupOk ? 'ok' : 'ng');
+    log(dupOk ? '→ 二重加算されませんでした' : '→ 二重加算の防止が働いていません', dupOk ? 'ok' : 'ng');
+    const r3 = await call('addDelta', { id: id, delta: -1, source: '試験(元に戻す)', requestId: rid() });
+    log('−1(元に戻す): ' + JSON.stringify(r3.data || r3), r3.ok && r3.data.after === d.own[0] ? 'ok' : 'ng');
+  });
+
+  $('b3').onclick = () => run('誤ったトークン', async () => {
+    const r = await call('getCards', {}, { token: 'x'.repeat(64) });
+    log('応答: ' + JSON.stringify(r).slice(0, 160), !r.ok && r.code === 'unauthorized' ? 'ok' : 'ng');
+  });
+
+  $('b4').onclick = async () => {
+    const text = lines.join('\n');
+    try { await navigator.clipboard.writeText(text); log('コピーしました', 'ok'); } catch (e) { log('コピーできません。ログを長押しで選択してください', 'ng'); }
+  };
+  log('UserAgent: ' + navigator.userAgent);
+})();
+</script>
+</body>
+</html>
