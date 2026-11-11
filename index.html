@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>カード連続スキャン</title>
+<style>
+  :root{--bg:#101215;--card:#1b1f24;--line:#2d333b;--tx:#e8eaed;--mut:#9aa0a6;--pri:#2f6fed;--ok:#4cd07d;--ng:#ff7b7b;--warn:#ffcf5c}
+  *{box-sizing:border-box}
+  body{margin:0;padding:10px 10px 40px;background:var(--bg);color:var(--tx);font-family:-apple-system,"Hiragino Sans",sans-serif;font-size:15px}
+  h2{font-size:14px;margin:14px 0 6px;color:var(--mut);font-weight:600}
+  .top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .top b{font-size:16px}.top span{font-size:12px;color:var(--mut)}
+  button{font-size:15px;border:0;border-radius:8px;padding:11px 12px;background:var(--pri);color:#fff}
+  button.sub{background:#3a4048}button.ok{background:#1f9d55}button.ng{background:#b3413f}
+  button:disabled{opacity:.4}
+  .vwrap{position:relative;background:#000;border-radius:10px;overflow:hidden;margin-top:8px}
+  video{display:block;width:100%;height:100%;object-fit:contain}
+  .guide{position:absolute;border:3px solid #fff8;border-radius:8px;pointer-events:none;transition:border-color .2s}
+  .guide.s-DETECT{border-color:var(--warn)}.guide.s-RECOGNIZE{border-color:#5bb6ff;border-style:dashed}
+  .guide.s-CHOOSE{border-color:var(--warn)}.guide.s-WAIT_REMOVAL{border-color:var(--ok)}.guide.s-FAILED_WAIT{border-color:var(--ng)}
+  .badge{position:absolute;left:8px;top:8px;background:#000b;border-radius:12px;padding:3px 10px;font-size:13px}
+  .empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--mut);font-size:14px;text-align:center;padding:20px}
+  .msg{margin:8px 0;min-height:22px;font-size:14px}.msg.err{color:var(--ng)}.msg.good{color:var(--ok)}
+  .row{display:flex;gap:8px;margin-top:8px}.row>*{flex:1}
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px;margin-top:8px}
+  .cand{display:flex;gap:10px;padding:8px 0;border-top:1px solid var(--line)}.cand:first-child{border-top:0}
+  .cand .info{flex:1;min-width:0}.cand .nm{font-weight:600}.cand .mt{font-size:12px;color:var(--mut);margin-top:2px;word-break:break-all}
+  .cand img{width:64px;height:90px;object-fit:contain;background:#000;border-radius:4px}
+  .cand .acts{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}.cand .acts button{padding:8px 10px;font-size:14px}
+  .job{display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-top:1px solid var(--line);font-size:13px}.job:first-child{border-top:0}
+  .job .st{color:var(--mut)}.job .st.fail{color:var(--ng)}.job .st.done{color:var(--ok)}
+  input,textarea{width:100%;padding:10px;font-size:15px;border-radius:6px;border:1px solid #444;background:#222;color:var(--tx)}
+  textarea{font-family:monospace;font-size:12px;min-height:140px}
+  label{display:block;font-size:12px;color:var(--mut);margin:8px 0 2px}
+  details summary{cursor:pointer;color:var(--mut);padding:6px 0}
+  pre{background:#000;border:1px solid var(--line);border-radius:6px;padding:8px;font-size:11px;white-space:pre-wrap;word-break:break-all;max-height:36vh;overflow:auto;margin:6px 0}
+  .rois{display:flex;flex-wrap:wrap;gap:6px}.rois figure{margin:0;font-size:11px;color:var(--mut)}.rois img{display:block;max-width:150px;max-height:60px;background:#000;border:1px solid var(--line)}
+  .toast{position:fixed;left:10px;right:10px;bottom:14px;background:#000d;border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:14px;display:none;z-index:9;align-items:center;justify-content:space-between;gap:10px}
+  .toast.show{display:flex}.toast button{padding:6px 10px;font-size:13px}
+  .chk{display:flex;align-items:center;gap:8px;margin-top:8px}.chk input{width:auto}
+</style>
+</head>
+<body>
+<div class="top"><b>カード連続スキャン</b><span id="total"></span></div>
+
+<div class="vwrap" id="vwrap" style="aspect-ratio:3/4">
+  <video id="v" playsinline muted autoplay></video>
+  <div class="guide" id="guide" hidden></div>
+  <div class="badge" id="badge">停止中</div>
+  <div class="empty" id="empty">「カメラ開始」を押してください</div>
+</div>
+<div class="msg" id="msg"></div>
+<div class="row">
+  <button id="camBtn">カメラ開始</button>
+  <button id="baseBtn" class="sub" disabled>背景を更新</button>
+</div>
+<label class="chk"><input type="checkbox" id="auto"> 高確度は確認なしで自動登録する</label>
+
+<div id="choose" class="panel" hidden>
+  <div id="chooseHead" style="font-size:13px;color:var(--warn)">候補から選んでください</div>
+  <div id="chooseList"></div>
+  <div class="row"><button id="skipBtn" class="sub">どれでもない(登録しない)</button></div>
+</div>
+
+<h2>登録の状況</h2>
+<div class="panel" id="jobs"><span style="color:var(--mut);font-size:13px">まだありません</span></div>
+
+<h2>名前で探す(手動)</h2>
+<input id="q" placeholder="カード名の一部を入力" autocomplete="off">
+<div class="panel" id="qres" hidden></div>
+
+<h2>接続設定</h2>
+<div class="panel">
+  <label>GASのウェブアプリURL(…/exec)</label>
+  <input id="gasUrl" inputmode="url" autocapitalize="off" autocomplete="off">
+  <label>APIトークン</label>
+  <input id="gasTok" type="password" autocapitalize="off" autocomplete="off">
+  <div class="row"><button id="saveBtn">保存して一覧を読み込む</button></div>
+  <div class="msg" id="setMsg" style="font-size:12px"></div>
+</div>
+
+<details class="panel">
+  <summary>調整・デバッグ(うまく認識できないとき)</summary>
+  <div style="font-size:12px;color:var(--mut)">リアルタイムの数値(枠の中の、模様の量・背景との差・動き)</div>
+  <pre id="live">-</pre>
+  <div style="font-size:12px;color:var(--mut)">最後に読み取った領域(切り出しが合っているか確認)</div>
+  <div class="rois" id="rois"></div>
+  <div style="font-size:12px;color:var(--mut);margin-top:8px">認識の記録(失敗例の分析に使えます)</div>
+  <pre id="alog">-</pre>
+  <div class="row"><button id="copyLog" class="sub">記録をコピー</button><button id="clearLog" class="sub">記録を消す</button></div>
+  <label>設定(JSON。変えた項目だけ書けます)</label>
+  <textarea id="cfgText" spellcheck="false"></textarea>
+  <div class="row"><button id="cfgSave">保存して適用</button><button id="cfgReset" class="sub">初期値に戻す</button></div>
+</details>
+
+<div class="toast" id="toast"><span id="toastT"></span><button id="toastB" class="sub" hidden>取り消す</button></div>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js" defer></script>
+<script defer>
+(function () {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch (e) { return d; } },
+    set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} },
+    del(k) { try { localStorage.removeItem(k); } catch (e) {} }
+  };
+
+  // ===================== 設定(すべて調整できます) =====================
+  // roi は [x, y, 幅, 高さ] で、枠(カード)全体に対する割合です。位置は実機で要調整(「調整・デバッグ」で切り出しを確認できます)。
+  const DEFAULTS = {
+    interval: 700,                // 何msごとに枠の中を調べるか
+    guideH: 0.86,                 // 枠の高さ(映像の高さに対する割合)
+    present: { grad: 12, diff: 22 },   // この値以上で「カードがある」
+    absent:  { grad: 7,  diff: 12 },   // 両方がこの値未満で「カードがない」
+    stableMove: 6,                // 前回との差がこれ以下なら「動いていない」
+    stableFrames: 2,              // 動いていない状態が何回続いたら認識を始めるか
+    absentFrames: 3,              // 「ない」が何回続いたら、カードが外れたとみなすか
+    maxAttempts: 3,               // 読み取りに失敗したとき、同じカードで何回までやり直すか
+    tHigh: 0.9,                   // 高確度: 1位の点数がこれ以上
+    margin: 0.12,                 // 高確度: 1位と2位の差がこれ以上
+    tMid: 0.55,                   // これ未満は低確度(登録しない)
+    autoRegister: true,           // 高確度を自動登録するか
+    roi: {
+      name:  [0.10, 0.00, 0.90, 0.14],
+      cost:  [0.00, 0.00, 0.18, 0.12],
+      power: [0.04, 0.87, 0.50, 0.10],
+      code:  [0.00, 0.93, 1.00, 0.07]
+    },
+    langPath: 'https://cdn.jsdelivr.net/npm/@tesseract.js-data/jpn/4.0.0_best_int',
+    maxLog: 40
+  };
+  function deepMerge(a, b) {
+    const o = Array.isArray(a) ? a.slice() : Object.assign({}, a);
+    for (const k in (b || {})) o[k] = (b[k] && typeof b[k] === 'object' && !Array.isArray(b[k]) && a[k] && typeof a[k] === 'object') ? deepMerge(a[k], b[k]) : b[k];
+    return o;
+  }
+  let userCfg = store.get('dmcfg', {});
+  let CFG = deepMerge(DEFAULTS, userCfg);
+
+  // ===================== 表示 =====================
+  function toast(msg, undo) {
+    const t = $('toast'); $('toastT').textContent = msg; const b = $('toastB');
+    b.hidden = !undo; b.onclick = () => { t.classList.remove('show'); if (undo) undo(); };
+    t.classList.add('show'); clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), undo ? 6000 : 2800);
+  }
+  function msg(text, cls) { const m = $('msg'); m.textContent = text || ''; m.className = 'msg' + (cls ? ' ' + cls : ''); }
+
+  // ===================== カード一覧 =====================
+  const norm = (s) => String(s == null ? '' : s).normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+  let DB = null;
+  function buildDB(d) {
+    const n = d.ids.length;
+    const db = { n, ids: d.ids, names: d.names, civ: d.civ, cost: d.cost, power: d.power || new Array(n).fill(''), rarity: d.rarity,
+      pack: d.pack.map((k) => d.packs[k] || ''), own: d.own.map((x) => Number(x) || 0),
+      nn: new Array(n), bg: new Array(n), prefix: new Array(n), num: new Array(n) };
+    const ps = new Set();
+    for (let i = 0; i < n; i++) {
+      db.nn[i] = norm(d.names[i]);
+      const set = new Set(); for (let k = 0; k < db.nn[i].length - 1; k++) set.add(db.nn[i].substr(k, 2)); db.bg[i] = [...set];
+      const [p, rest] = String(d.ids[i]).split('-');
+      db.prefix[i] = (p || '').toUpperCase();
+      db.num[i] = /^\d+$/.test(rest || '') ? parseInt(rest, 10) : null;
+      if (db.prefix[i].length >= 5) ps.add(db.prefix[i]);
+    }
+    db.prefixSet = [...ps];
+    db.idx = new Map(d.ids.map((id, i) => [id, i]));
+    return db;
+  }
+
+  // ===================== API(GAS) =====================
+  async function api(op, args) {
+    const url = (store.get('gasUrl', '') || '').trim(), token = (store.get('gasTok', '') || '').trim();
+    if (!url || !token) throw Object.assign(new Error('接続設定(URLとトークン)を入力してください'), { fatal: true });
+    const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 40000);
+    try {
+      const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ token, op, args: args || {} }), redirect: 'follow', signal: ctl.signal });
+      const text = await res.text();
+      try { return JSON.parse(text); } catch (e) { throw new Error('サーバーの応答が不正です(HTTP ' + res.status + ')'); }
+    } finally { clearTimeout(to); }
+  }
+
+  async function loadCards(fromCacheFirst) {
+    if (fromCacheFirst) {
+      const c = store.get('dmcards', null);
+      if (c && c.ids) { DB = buildDB(c); updateTotal(); }
+    }
+    try {
+      const r = await api('getCards');
+      if (!r.ok) throw Object.assign(new Error(r.error || '取得に失敗しました'), { fatal: r.code === 'unauthorized' });
+      DB = buildDB(r.data); store.set('dmcards', r.data); updateTotal();
+      $('setMsg').textContent = `カード一覧を読み込みました(${DB.n.toLocaleString()}枚)`;
+      return true;
+    } catch (e) {
+      $('setMsg').textContent = '一覧を読み込めませんでした: ' + e.message + (DB ? '(前回の一覧を使います)' : '');
+      return false;
+    }
+  }
+  function updateTotal() {
+    if (!DB) { $('total').textContent = ''; return; }
+    let k = 0, q = 0; for (let i = 0; i < DB.n; i++) if (DB.own[i] > 0) { k++; q += DB.own[i]; }
+    $('total').textContent = `所持 ${k}種類 / ${q}枚`;
+  }
+
+  // ===================== 登録キュー(再送しても二重加算にならない) =====================
+  // ジョブは1件ずつ順番に送る。失敗したら、同じリクエストIDで再送する。ページを閉じても残る。
+  let queue = store.get('dmq', []);
+  let done = [];                      // 完了・失敗の表示用
+  let pumping = false, paused = false;
+  const newRid = () => 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+  function persistQ() { store.set('dmq', queue); }
+  function enqueue(i, delta, source) {
+    const job = { rid: newRid(), id: DB.ids[i], name: DB.names[i], delta, source: source || 'カメラ', tries: 0, status: 'wait' };
+    queue.push(job); persistQ(); renderJobs(); pump(); return job;
+  }
+  async function pump() {
+    if (pumping) return; pumping = true; paused = false;
+    while (queue.length) {
+      const job = queue[0]; job.status = 'send'; renderJobs();
+      try {
+        const r = await api('addDelta', { id: job.id, delta: job.delta, source: job.source, requestId: job.rid });
+        if (r.ok) {
+          const i = DB && DB.idx.get(job.id); if (i != null) DB.own[i] = r.data.after;
+          done.unshift({ ...job, status: 'done', before: r.data.before, after: r.data.after, dup: !!r.data.duplicate });
+          queue.shift(); persistQ(); updateTotal();
+        } else if (r.code === 'busy') { job.tries++; await sleep(1200); continue; }
+        else {
+          done.unshift({ ...job, status: 'fail', error: r.error || r.code });
+          queue.shift(); persistQ();
+          if (r.code === 'unauthorized') { msg('トークンが正しくありません。接続設定を確認してください', 'err'); }
+        }
+      } catch (e) {
+        job.tries++; job.status = 'retry'; job.error = e.message;
+        if (e.fatal || job.tries >= 6) { paused = true; job.status = 'paused'; renderJobs(); break; }   // 同じリクエストIDのまま、あとで再送できる
+        renderJobs(); await sleep(Math.min(8000, 1000 * Math.pow(2, job.tries)));
+      }
+      renderJobs();
+    }
+    pumping = false; renderJobs();
+  }
+  function renderJobs() {
+    const box = $('jobs'); box.textContent = '';
+    const rows = [...queue.map((j) => ({ ...j })), ...done.slice(0, 12)];
+    if (!rows.length) { box.innerHTML = '<span style="color:var(--mut);font-size:13px">まだありません</span>'; return; }
+    rows.forEach((j) => {
+      const el = document.createElement('div'); el.className = 'job';
+      const a = document.createElement('div'); a.textContent = `${j.name} ${j.delta > 0 ? '＋' : '−'}${Math.abs(j.delta)}`;
+      const b = document.createElement('div'); b.className = 'st';
+      if (j.status === 'done') { b.className = 'st done'; b.textContent = `${j.before}→${j.after}枚` + (j.dup ? '(再送・加算済み)' : ''); }
+      else if (j.status === 'fail') { b.className = 'st fail'; b.textContent = '失敗: ' + j.error; }
+      else if (j.status === 'paused') { b.className = 'st fail'; b.textContent = '送れていません '; const bt = document.createElement('button'); bt.className = 'sub'; bt.style.padding = '4px 8px'; bt.textContent = '再送'; bt.onclick = () => { queue.forEach((q) => { q.tries = 0; }); pump(); }; b.appendChild(bt); }
+      else if (j.status === 'retry') b.textContent = '再送待ち…';
+      else if (j.status === 'send') b.textContent = '送信中…';
+      else b.textContent = '待機中';
+      if (j.status === 'done' && j.delta > 0 && !j.undone) {
+        const u = document.createElement('button'); u.className = 'sub'; u.style.cssText = 'padding:4px 8px;margin-left:6px'; u.textContent = '取り消す';
+        u.onclick = () => { const i = DB.idx.get(j.id); const orig = done.find((x) => x.rid === j.rid); if (orig) orig.undone = true; enqueue(i, -j.delta, '取り消し'); };
+        b.appendChild(u);
+      }
+      el.append(a, b); box.appendChild(el);
+    });
+  }
+
+  // ===================== 文字から候補を探す =====================
+  let _p = new Int32Array(1024), _c = new Int32Array(1024);
+  function approxDist(p, t, maxD) {
+    const m = p.length, n = t.length;
+    if (_p.length < n + 1) { _p = new Int32Array(n + 1); _c = new Int32Array(n + 1); }
+    let prev = _p, cur = _c; for (let j = 0; j <= n; j++) prev[j] = 0;
+    for (let i = 1; i <= m; i++) {
+      cur[0] = i; let rm = i; const pc = p.charCodeAt(i - 1);
+      for (let j = 1; j <= n; j++) {
+        let v = prev[j - 1] + (pc === t.charCodeAt(j - 1) ? 0 : 1);
+        const a = prev[j] + 1; if (a < v) v = a; const b = cur[j - 1] + 1; if (b < v) v = b;
+        cur[j] = v; if (v < rm) rm = v;
+      }
+      if (rm > maxD) return maxD + 1;
+      const tmp = prev; prev = cur; cur = tmp;
+    }
+    let best = prev[0]; for (let j = 1; j <= n; j++) if (prev[j] < best) best = prev[j]; return best;
+  }
+  const POOL = 24;
+  // 名前の読み取り結果から候補を作る(mode 'full' は、カード全体を読んだ文字なので点数を下げる)
+  function rankName(text, mode) {
+    const full = mode === 'full'; let T = norm(text);
+    if (!DB || T.length < 2) return [];
+    if (T.length > 800) T = T.slice(0, 800);
+    const TB = new Set(); for (let i = 0; i < T.length - 1; i++) TB.add(T.substr(i, 2));
+    const out = [];
+    for (let i = 0; i < DB.n; i++) {
+      const nm = DB.nn[i], L = nm.length; if (L < 1) continue;
+      let d;
+      if (T.includes(nm)) d = 0;
+      else if (L < 4) continue;
+      else {
+        let hit = 0; for (const g of DB.bg[i]) if (TB.has(g)) hit++;
+        if (hit / DB.bg[i].length < (full ? 0.5 : 0.3)) continue;
+        const maxD = Math.floor(L * (full ? 0.2 : 0.4)); d = approxDist(nm, T, maxD); if (d > maxD) continue;
+      }
+      const sim = 1 - d / L, tf = Math.min(1, L / T.length);
+      if (L <= 3 && tf < 0.5) continue;
+      let s = sim * (0.4 + 0.6 * tf) + (d === 0 && L >= 4 ? 0.07 : 0);
+      if (full) s *= 0.55;
+      out.push({ i, s, base: s });
+    }
+    out.sort((a, b) => b.s - a.s || a.i - b.i);
+    return out.slice(0, POOL);
+  }
+  function mergeRanks(a, b) {
+    const m = new Map();
+    for (const x of [...a, ...b]) if (!m.has(x.i) || m.get(x.i).base < x.base) m.set(x.i, { ...x });
+    return [...m.values()].sort((p, q) => q.base - p.base || p.i - q.i).slice(0, POOL);
+  }
+  const digitsOf = (v) => { const m = String(v == null ? '' : v).match(/\d+/); return m ? parseInt(m[0], 10) : null; };
+  // コード(セット名・番号)、コスト、パワーで補正する。読めなかった項目は、点数を動かさない
+  function applyBoosts(list, codeText, costRead, powerRead) {
+    const TT = String(codeText || '').normalize('NFKC').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    const seen = new Set(DB.prefixSet.filter((p) => TT.includes(p)));
+    const nums = new Set(); for (const m of String(codeText || '').normalize('NFKC').matchAll(/(\d{1,3})\s*\/\s*(\d{1,3})/g)) nums.add(parseInt(m[1], 10));
+    return list.map((c) => {
+      let s = c.base; const why = [];
+      if (seen.has(DB.prefix[c.i])) { s += 0.1; why.push('セット'); if (DB.num[c.i] != null && nums.has(DB.num[c.i])) { s += 0.1; why.push('番号'); } }
+      const dc = digitsOf(DB.cost[c.i]);
+      if (costRead != null && dc != null) { if (dc === costRead) { s += 0.06; why.push('コスト一致'); } else { s -= 0.25; why.push('コスト不一致'); } }
+      const dp = digitsOf(DB.power[c.i]);
+      if (powerRead != null && dp != null) { if (dp === powerRead) { s += 0.04; why.push('パワー一致'); } else { s -= 0.2; why.push('パワー不一致'); } }
+      return { ...c, s, why };
+    }).sort((a, b) => b.s - a.s || a.i - b.i);
+  }
+  function classify(list) {
+    const best = list[0], second = list[1];
+    if (!best || best.s < CFG.tMid) return 'low';
+    const contradict = best.why && best.why.some((w) => w.includes('不一致'));
+    if (best.s >= CFG.tHigh && (!second || best.s - second.s >= CFG.margin) && !contradict) return 'high';
+    return 'mid';
+  }
+
+  // ===================== 画像の準備・文字認識 =====================
+  function cropCanvas(src, x, y, w, h) {
+    const c = document.createElement('canvas'); c.width = Math.max(1, Math.round(w)); c.height = Math.max(1, Math.round(h));
+    c.getContext('2d').drawImage(src, Math.round(x), Math.round(y), c.width, c.height, 0, 0, c.width, c.height); return c;
+  }
+  function roiCanvas(card, roi) { return cropCanvas(card, roi[0] * card.width, roi[1] * card.height, roi[2] * card.width, roi[3] * card.height); }
+  // 白黒にしてコントラストを広げる(反転も可)。小さい領域は targetW まで拡大する
+  function prep(src, invert, targetW) {
+    const W = targetW, sc = W / src.width;
+    const c = document.createElement('canvas'); c.width = W; c.height = Math.max(1, Math.round(src.height * sc));
+    const g = c.getContext('2d', { willReadFrequently: true }); g.imageSmoothingQuality = 'high'; g.drawImage(src, 0, 0, c.width, c.height);
+    const im = g.getImageData(0, 0, c.width, c.height), d = im.data, hist = new Uint32Array(256);
+    for (let i = 0; i < d.length; i += 4) { const y = ((d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000) | 0; d[i] = y; hist[y]++; }
+    const total = c.width * c.height; let lo = 0, hi = 255, acc = 0;
+    for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= total * 0.02) { lo = v; break; } }
+    acc = 0; for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= total * 0.02) { hi = v; break; } }
+    const span = Math.max(1, hi - lo);
+    for (let i = 0; i < d.length; i += 4) { let y = ((d[i] - lo) * 255) / span; y = y < 0 ? 0 : y > 255 ? 255 : y; if (invert) y = 255 - y; d[i] = d[i + 1] = d[i + 2] = y; d[i + 3] = 255; }
+    g.putImageData(im, 0, 0); return c;
+  }
+  let workerP = null;
+  function getWorker() {
+    if (workerP) return workerP;
+    workerP = (async () => {
+      for (let i = 0; i < 50 && typeof Tesseract === 'undefined'; i++) await sleep(100);
+      if (typeof Tesseract === 'undefined') throw new Error('文字認識の部品を読み込めませんでした(通信を確認してください)');
+      try { return await Tesseract.createWorker('jpn', 1, { langPath: CFG.langPath }); }
+      catch (e) { return await Tesseract.createWorker('jpn', 1, {}); }
+    })();
+    workerP.catch(() => { workerP = null; });
+    return workerP;
+  }
+  async function ocr(canvas, psm, whitelist) {
+    const w = await getWorker();
+    await w.setParameters({ tessedit_pageseg_mode: String(psm), tessedit_char_whitelist: whitelist || '', preserve_interword_spaces: '0' });
+    const r = await w.recognize(canvas); return (r && r.data && r.data.text) || '';
+  }
+
+  // ===================== カメラと枠 =====================
+  const video = $('v');
+  let stream = null, wake = null;
+  let guide = { x: 0, y: 0, w: 0, h: 0 };
+  function computeGuide() {
+    const vw = video.videoWidth, vh = video.videoHeight; if (!vw) return;
+    let gh = vh * CFG.guideH, gw = gh * 63 / 88; if (gw > vw * 0.94) { gw = vw * 0.94; gh = gw * 88 / 63; }
+    guide = { x: (vw - gw) / 2, y: (vh - gh) / 2, w: gw, h: gh };
+    const g = $('guide'); g.hidden = false;
+    g.style.left = (guide.x / vw * 100) + '%'; g.style.top = (guide.y / vh * 100) + '%';
+    g.style.width = (guide.w / vw * 100) + '%'; g.style.height = (guide.h / vh * 100) + '%';
+    $('vwrap').style.aspectRatio = vw + '/' + vh;
+  }
+  async function startCamera() {
+    if (stream) return;
+    if (!DB) { msg('カード一覧がまだ読み込まれていません。接続設定を確認してください', 'err'); }
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
+    } catch (e) { stream = null; msg('カメラを起動できませんでした: ' + e.name + '。ブラウザのカメラ許可を確認してください', 'err'); return; }
+    video.srcObject = stream; await video.play().catch(() => {});
+    if (!video.videoWidth) await new Promise((r) => video.addEventListener('loadedmetadata', r, { once: true }));
+    computeGuide(); $('empty').hidden = true; $('camBtn').textContent = 'カメラ停止'; $('baseBtn').disabled = false;
+    try { if (navigator.wakeLock) wake = await navigator.wakeLock.request('screen'); } catch (e) {}
+    stream.getVideoTracks()[0].addEventListener('ended', stopCamera);
+    resetScan(); loopTimer = setInterval(tick, CFG.interval);
+  }
+  function stopCamera() {
+    clearInterval(loopTimer); loopTimer = null; token++;
+    if (stream) stream.getTracks().forEach((t) => t.stop()); stream = null; video.srcObject = null;
+    try { if (wake) wake.release(); } catch (e) {} wake = null;
+    $('guide').hidden = true; $('empty').hidden = false; $('camBtn').textContent = 'カメラ開始'; $('baseBtn').disabled = true;
+    state = 'IDLE'; showState(); hideChoose();
+  }
+
+  // ===================== 枠の中の観測(カードがあるか・動いていないか) =====================
+  const SW = 48, SH = 67, samp = document.createElement('canvas'); samp.width = SW; samp.height = SH;
+  const sctx = samp.getContext('2d', { willReadFrequently: true });
+  let baseline = null, prevGray = null;
+  function sample() {
+    if (!video.videoWidth) return null;
+    sctx.drawImage(video, guide.x, guide.y, guide.w, guide.h, 0, 0, SW, SH);
+    const d = sctx.getImageData(0, 0, SW, SH).data, g = new Float32Array(SW * SH);
+    for (let i = 0, k = 0; i < d.length; i += 4, k++) g[k] = (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000;
+    let grad = 0, n = 0;
+    for (let y = 0; y < SH - 1; y++) for (let x = 0; x < SW - 1; x++) { const k = y * SW + x; grad += Math.abs(g[k + 1] - g[k]) + Math.abs(g[k + SW] - g[k]); n++; }
+    grad /= n;
+    let diff = 0, move = 0;
+    if (baseline) { for (let k = 0; k < g.length; k++) diff += Math.abs(g[k] - baseline[k]); diff /= g.length; } else diff = 0;
+    if (prevGray) { for (let k = 0; k < g.length; k++) move += Math.abs(g[k] - prevGray[k]); move /= g.length; } else move = 99;
+    return { g, grad, diff, move };
+  }
+
+  // ===================== 状態管理 =====================
+  // IDLE(カードなし) → DETECT(検出・安定待ち) → RECOGNIZE(読み取り中) → CHOOSE(選択待ち) / WAIT_REMOVAL(外れるまで待つ) / FAILED_WAIT
+  let state = 'IDLE', loopTimer = null, token = 0, tickN = 0, isPresent = false;
+  let stable = 0, absentN = 0, attempts = 0, pool = [], cardStats = null;
+  const STATE_TEXT = { IDLE: 'カードをかざしてください', DETECT: 'カードを検出…そのまま動かさずに', RECOGNIZE: '読み取り中…', CHOOSE: '候補から選んでください', WAIT_REMOVAL: 'カードを外してください', FAILED_WAIT: '読み取れませんでした。カードを外してください' };
+  function showState() {
+    $('badge').textContent = stream ? ({ IDLE: '待機中', DETECT: '検出中', RECOGNIZE: '認識中', CHOOSE: '選択待ち', WAIT_REMOVAL: '登録済み', FAILED_WAIT: '失敗' })[state] : '停止中';
+    $('guide').className = 'guide s-' + state;
+  }
+  function setState(s, text, cls) { state = s; showState(); msg(text !== undefined ? text : STATE_TEXT[s], cls); }
+  function resetScan() { baseline = null; prevGray = null; tickN = 0; isPresent = false; stable = 0; absentN = 0; attempts = 0; pool = []; token++; setState('IDLE'); }
+
+  function tick() {
+    if (!stream) return;
+    const m = sample(); if (!m) return; tickN++;
+    // カードがあるかを、ヒステリシス付きで判定(入るとき・出るときで基準を変える)
+    const P = CFG.present, A = CFG.absent;
+    if (!baseline && state === 'IDLE' && tickN >= 2 && m.grad < P.grad) baseline = m.g.slice();
+    isPresent = isPresent ? !(m.grad < A.grad && m.diff < A.diff) : (m.grad >= P.grad || m.diff >= P.diff);
+    if (!isPresent && state === 'IDLE' && baseline) { for (let k = 0; k < baseline.length; k++) baseline[k] = baseline[k] * 0.9 + m.g[k] * 0.1; }   // 明るさの変化に追従
+    live(m);
+    if (!isPresent) absentN++; else absentN = 0;
+    const gone = absentN >= CFG.absentFrames;
+
+    if (state === 'IDLE') { if (isPresent) { stable = 0; attempts = 0; pool = []; setState('DETECT'); } }
+    else if (state === 'DETECT') {
+      if (gone) { setState('IDLE'); }
+      else if (isPresent) {
+        stable = m.move <= CFG.stableMove ? stable + 1 : 0;
+        if (stable >= CFG.stableFrames) { recognize(); }
+      }
+    }
+    else if (state === 'RECOGNIZE') { if (gone) { token++; setState('IDLE'); } }                 // 読み取り中にカードが外れたら、結果は捨てる
+    else if (state === 'CHOOSE') { if (gone) { hideChoose(); setState('IDLE'); } }
+    else if (state === 'WAIT_REMOVAL' || state === 'FAILED_WAIT') { if (gone) { stable = 0; attempts = 0; pool = []; setState('IDLE'); } }   // 外れたことを確認できたときだけ、次を許可
+    prevGray = m.g;
+  }
+
+  // ===================== 認識 =====================
+  let lastRois = {};
+  function captureCard() {
+    const c = document.createElement('canvas'); c.width = Math.round(guide.w); c.height = Math.round(guide.h);
+    c.getContext('2d').drawImage(video, guide.x, guide.y, guide.w, guide.h, 0, 0, c.width, c.height); return c;
+  }
+  async function recognize() {
+    const my = ++token; setState('RECOGNIZE'); attempts++;
+    const rec = { t: new Date().toTimeString().slice(0, 8), attempt: attempts, passes: [], code: '', cost: null, power: null };
+    try {
+      if (!DB) throw new Error('カード一覧が読み込まれていません');
+      const card = captureCard(), R = CFG.roi, alive = () => my === token;
+      lastRois = { name: roiCanvas(card, R.name), cost: roiCanvas(card, R.cost), power: roiCanvas(card, R.power), code: roiCanvas(card, R.code) };
+      // 1) カード名(必要なときだけ、反転→全体の順で追加)
+      let list = pool.slice();
+      const nameSrc = lastRois.name;
+      let t = await ocr(prep(nameSrc, false, 1200), 6); if (!alive()) return;
+      rec.passes.push('名前: ' + t.trim()); list = mergeRanks(list, rankName(t, 'top'));
+      if (!list.length || list[0].base < CFG.tHigh) {
+        t = await ocr(prep(nameSrc, true, 1200), 6); if (!alive()) return;
+        rec.passes.push('名前(反転): ' + t.trim()); list = mergeRanks(list, rankName(t, 'top'));
+      }
+      if ((!list.length || list[0].base < CFG.tMid) && attempts >= 2) {
+        const upper = cropCanvas(card, 0, 0, card.width, card.height * 0.3);
+        t = await ocr(prep(upper, false, 1400), 11); if (!alive()) return;
+        rec.passes.push('上部全体: ' + t.trim()); list = mergeRanks(list, rankName(t, 'full'));
+      }
+      pool = list;
+      // 2) 補助情報(候補があるときだけ): コード・コスト・(必要なら)パワー
+      let codeText = '', costRead = null, powerRead = null;
+      if (list.length) {
+        codeText = await ocr(prep(lastRois.code, false, 1400), 7, 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-/ '); if (!alive()) return;
+        rec.code = codeText.trim();
+        const ct = await ocr(prep(lastRois.cost, false, 300), 7, '0123456789'); if (!alive()) return;
+        const cm = ct.replace(/\D/g, ''); if (cm.length >= 1 && cm.length <= 2) costRead = parseInt(cm, 10); rec.cost = costRead;
+        const top = list.slice(0, 4).filter((c) => c.base >= list[0].base - 0.15);
+        if (new Set(top.map((c) => digitsOf(DB.power[c.i]))).size > 1) {
+          const pt = await ocr(prep(lastRois.power, false, 600), 7, '0123456789'); if (!alive()) return;
+          const pm = pt.replace(/\D/g, ''); const pn = pm.length >= 3 && pm.length <= 6 ? parseInt(pm, 10) : null; if (pn != null && pn % 100 === 0) powerRead = pn; rec.power = powerRead;
+        }
+      }
+      const ranked = applyBoosts(list, codeText, costRead, powerRead);
+      const tier = classify(ranked);
+      rec.tier = tier; rec.top = ranked.slice(0, 4).map((c) => `${DB.names[c.i]}[${DB.ids[c.i]}] ${c.s.toFixed(2)}${c.why && c.why.length ? '(' + c.why.join(',') + ')' : ''}`);
+      pushLog(rec); showRois();
+      if (!alive()) return;
+      if (tier === 'high' && CFG.autoRegister) { register(ranked[0].i, true); }
+      else if (tier === 'high' || tier === 'mid') { showChoose(ranked.slice(0, 8), tier === 'high' ? '確認してください(自動登録はオフです)' : '候補が近いです。合っているものを選んでください'); setState('CHOOSE'); }
+      else if (attempts < CFG.maxAttempts) { rec.retry = true; stable = 0; setState('DETECT', `読み取れませんでした。もう一度読みます(${attempts}/${CFG.maxAttempts})…`); }
+      else { setState('FAILED_WAIT', STATE_TEXT.FAILED_WAIT, 'err'); showManualHint(); }
+    } catch (e) {
+      rec.error = e.message; pushLog(rec);
+      if (my === token) { setState('FAILED_WAIT', '読み取りに失敗しました: ' + e.message, 'err'); }
+    }
+  }
+  function register(i, auto) {
+    enqueue(i, +1, auto ? 'カメラ(自動)' : 'カメラ(選択)');
+    hideChoose(); setState('WAIT_REMOVAL', `登録: ${DB.names[i]}(${DB.ids[i]})。カードを外してください`, 'good');
+    toast(`${DB.names[i]} を +1 しました`, () => { enqueue(i, -1, '取り消し'); });
+  }
+
+  // ===================== 候補の表示 =====================
+  function candEl(i, onPick, label) {
+    const el = document.createElement('div'); el.className = 'cand';
+    const info = document.createElement('div'); info.className = 'info';
+    const nm = document.createElement('div'); nm.className = 'nm'; nm.textContent = DB.names[i];
+    const mt = document.createElement('div'); mt.className = 'mt';
+    mt.textContent = [DB.civ[i], DB.cost[i] !== '' && DB.cost[i] != null ? 'コスト' + DB.cost[i] : '', DB.power[i] ? 'パワー' + DB.power[i] : '', DB.rarity[i], DB.ids[i], DB.pack[i] || '(パック情報なし)', `所持${DB.own[i]}枚`].filter(Boolean).join(' / ');
+    const acts = document.createElement('div'); acts.className = 'acts';
+    const pick = document.createElement('button'); pick.className = 'ok'; pick.textContent = label || '＋1 する'; pick.onclick = () => onPick(i);
+    const img = document.createElement('button'); img.className = 'sub'; img.textContent = '画像を見る';
+    img.onclick = () => { // 画像は、押したときだけ取得する
+      if (el.querySelector('img')) return; const im = document.createElement('img'); im.referrerPolicy = 'no-referrer'; im.alt = '';
+      im.src = 'https://dm.takaratomy.co.jp/wp-content/card/cardimage/' + DB.ids[i] + '.jpg'; el.insertBefore(im, info); img.disabled = true;
+    };
+    acts.append(pick, img); info.append(nm, mt, acts); el.appendChild(info); return el;
+  }
+  function showChoose(list, head) {
+    $('chooseHead').textContent = head; const box = $('chooseList'); box.textContent = '';
+    list.forEach((c) => box.appendChild(candEl(c.i, (i) => { if (state === 'CHOOSE') register(i, false); })));
+    $('choose').hidden = false;
+  }
+  function hideChoose() { $('choose').hidden = true; $('chooseList').textContent = ''; }
+  function showManualHint() { $('q').focus({ preventScroll: false }); }
+
+  // ===================== 手動検索 =====================
+  let qT = null;
+  $('q').addEventListener('input', () => {
+    clearTimeout(qT); qT = setTimeout(() => {
+      const k = norm($('q').value), box = $('qres'); box.textContent = '';
+      if (!k || !DB) { box.hidden = true; return; }
+      const a = [], b = []; for (let i = 0; i < DB.n; i++) { const p = DB.nn[i].indexOf(k); if (p === 0) a.push(i); else if (p > 0) b.push(i); }
+      const all = a.concat(b); box.hidden = false;
+      if (!all.length) { box.innerHTML = '<span style="color:var(--mut);font-size:13px">見つかりません</span>'; return; }
+      all.slice(0, 20).forEach((i) => box.appendChild(candEl(i, (j) => { enqueue(j, +1, '手動'); toast(`${DB.names[j]} を +1 しました`, () => enqueue(j, -1, '取り消し')); })));
+      if (all.length > 20) { const p = document.createElement('div'); p.style.cssText = 'color:var(--mut);font-size:12px;padding-top:6px'; p.textContent = `${all.length}件中、先頭20件`; box.appendChild(p); }
+    }, 200);
+  });
+
+  // ===================== 調整・デバッグ =====================
+  const alog = [];
+  function pushLog(r) { alog.unshift(r); if (alog.length > CFG.maxLog) alog.pop(); $('alog').textContent = alog.map((x) => JSON.stringify(x, null, 0)).join('\n') || '-'; }
+  function showRois() {
+    const box = $('rois'); box.textContent = '';
+    for (const k of ['name', 'cost', 'power', 'code']) { const f = document.createElement('figure'); const im = document.createElement('img'); im.src = lastRois[k].toDataURL('image/jpeg', 0.7); f.append(im, document.createTextNode(k)); box.appendChild(f); }
+  }
+  function live(m) { $('live').textContent = `状態 ${state}\n模様 ${m.grad.toFixed(1)}(あり≥${CFG.present.grad} / なし<${CFG.absent.grad})\n背景との差 ${m.diff.toFixed(1)}(あり≥${CFG.present.diff} / なし<${CFG.absent.diff})\n動き ${m.move.toFixed(1)}(安定≤${CFG.stableMove})\nカード判定 ${isPresent ? 'あり' : 'なし'} / 安定 ${stable} / 不在 ${absentN}`; }
+  $('copyLog').onclick = async () => { try { await navigator.clipboard.writeText(alog.map((x) => JSON.stringify(x)).join('\n')); toast('記録をコピーしました'); } catch (e) { toast('コピーできません。長押しで選択してください'); } };
+  $('clearLog').onclick = () => { alog.length = 0; $('alog').textContent = '-'; };
+  $('cfgText').value = JSON.stringify(userCfg, null, 2) === '{}' ? '{\n  "tHigh": 0.9\n}' : JSON.stringify(userCfg, null, 2);
+  $('cfgSave').onclick = () => {
+    try { const o = JSON.parse($('cfgText').value); userCfg = o; store.set('dmcfg', o); CFG = deepMerge(DEFAULTS, o); $('auto').checked = !!CFG.autoRegister; if (stream) { computeGuide(); clearInterval(loopTimer); loopTimer = setInterval(tick, CFG.interval); } toast('設定を適用しました'); }
+    catch (e) { toast('JSONの形式が正しくありません'); }
+  };
+  $('cfgReset').onclick = () => { store.del('dmcfg'); userCfg = {}; CFG = deepMerge(DEFAULTS, {}); $('cfgText').value = '{\n  "tHigh": 0.9\n}'; $('auto').checked = !!CFG.autoRegister; toast('初期値に戻しました'); };
+
+  // ===================== イベント =====================
+  $('camBtn').onclick = () => { if (stream) stopCamera(); else startCamera(); };
+  $('baseBtn').onclick = () => { const m = sample(); if (m) { baseline = m.g.slice(); toast('いまの映像を「カードなし」の背景にしました'); } };
+  $('skipBtn').onclick = () => { if (state === 'CHOOSE') { hideChoose(); setState('WAIT_REMOVAL', '登録しませんでした。カードを外してください'); } };
+  $('auto').checked = !!CFG.autoRegister;
+  $('auto').onchange = () => { userCfg.autoRegister = $('auto').checked; store.set('dmcfg', userCfg); CFG.autoRegister = $('auto').checked; $('cfgText').value = JSON.stringify(userCfg, null, 2); };
+  $('gasUrl').value = store.get('gasUrl', ''); $('gasTok').value = store.get('gasTok', '');
+  $('saveBtn').onclick = async () => { store.set('gasUrl', $('gasUrl').value.trim()); store.set('gasTok', $('gasTok').value.trim()); $('setMsg').textContent = '読み込み中…'; await loadCards(false); if (queue.length) pump(); };
+  document.addEventListener('visibilitychange', () => { if (document.hidden && stream) stopCamera(); });
+  window.addEventListener('online', () => { if (queue.length) { queue.forEach((q) => { q.tries = 0; }); pump(); } });
+
+  renderJobs();
+  loadCards(true).then(() => { if (queue.length) pump(); });
+  window.__app = { get state() { return state; }, get CFG() { return CFG; }, tick, rankName, applyBoosts, classify, mergeRanks, getDB: () => DB, queue: () => queue, done: () => done, alog, startCamera, stopCamera };
+})();
+</script>
+</body>
+</html>
