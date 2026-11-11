@@ -47,20 +47,30 @@
 <div class="vwrap" id="vwrap" style="aspect-ratio:3/4">
   <video id="v" playsinline muted autoplay></video>
   <div class="guide" id="guide" hidden></div>
+  <canvas id="still" style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:none"></canvas>
   <div class="badge" id="badge">停止中</div>
   <div class="empty" id="empty">「カメラ開始」を押してください</div>
 </div>
 <div class="msg" id="msg"></div>
+<div class="row" id="modeRow">
+  <button id="modePhoto" class="sub">写真で読み取る</button>
+  <button id="modeCont" class="sub">連続スキャン</button>
+</div>
 <div class="row">
   <button id="camBtn">カメラ開始</button>
-  <button id="baseBtn" class="sub" disabled>背景を更新</button>
+  <button id="shutBtn" class="ok" disabled>撮影して読み取る</button>
+  <button id="baseBtn" class="sub" disabled hidden>背景を更新</button>
+</div>
+<div class="row">
+  <button id="fileBtn" class="sub">写真を選んで読み取る(撮影・アルバム)</button>
+  <input type="file" id="fileIn" accept="image/*" hidden>
 </div>
 <label class="chk"><input type="checkbox" id="auto"> 高確度は確認なしで自動登録する</label>
 
 <div id="choose" class="panel" hidden>
   <div id="chooseHead" style="font-size:13px;color:var(--warn)">候補から選んでください</div>
   <div id="chooseList"></div>
-  <div class="row"><button id="skipBtn" class="sub">どれでもない(登録しない)</button></div>
+  <div class="row"><button id="skipBtn" class="sub">どれでもない(登録しない)</button><button id="retakeBtn" class="sub">撮り直す</button></div>
 </div>
 
 <h2>登録の状況</h2>
@@ -122,6 +132,7 @@
     tHigh: 0.9,                   // 高確度: 1位の点数がこれ以上
     margin: 0.12,                 // 高確度: 1位と2位の差がこれ以上
     tMid: 0.55,                   // これ未満は低確度(登録しない)
+    mode: 'photo',                // 'photo' = 撮影ボタンで1枚ずつ / 'continuous' = 連続スキャン
     autoRegister: true,           // 高確度を自動登録するか
     roi: {
       name:  [0.10, 0.00, 0.90, 0.14],
@@ -396,17 +407,17 @@
     } catch (e) { stream = null; msg('カメラを起動できませんでした: ' + e.name + '。ブラウザのカメラ許可を確認してください', 'err'); return; }
     video.srcObject = stream; await video.play().catch(() => {});
     if (!video.videoWidth) await new Promise((r) => video.addEventListener('loadedmetadata', r, { once: true }));
-    computeGuide(); $('empty').hidden = true; $('camBtn').textContent = 'カメラ停止'; $('baseBtn').disabled = false;
+    computeGuide(); $('empty').hidden = true; $('camBtn').textContent = 'カメラ停止'; $('baseBtn').disabled = false; $('shutBtn').disabled = false;
     try { if (navigator.wakeLock) wake = await navigator.wakeLock.request('screen'); } catch (e) {}
     stream.getVideoTracks()[0].addEventListener('ended', stopCamera);
-    resetScan(); loopTimer = setInterval(tick, CFG.interval);
+    if (isPhoto()) { setState('IDLE'); } else { resetScan(); loopTimer = setInterval(tick, CFG.interval); }
   }
   function stopCamera() {
     clearInterval(loopTimer); loopTimer = null; token++;
     if (stream) stream.getTracks().forEach((t) => t.stop()); stream = null; video.srcObject = null;
     try { if (wake) wake.release(); } catch (e) {} wake = null;
-    $('guide').hidden = true; $('empty').hidden = false; $('camBtn').textContent = 'カメラ開始'; $('baseBtn').disabled = true;
-    state = 'IDLE'; showState(); hideChoose();
+    $('guide').hidden = true; $('empty').hidden = false; $('camBtn').textContent = 'カメラ開始'; $('baseBtn').disabled = true; $('shutBtn').disabled = true;
+    hideStill(); state = 'IDLE'; showState(); hideChoose(); if (isPhoto()) msg('カメラを開始するか、写真を選んでください');
   }
 
   // ===================== 枠の中の観測(カードがあるか・動いていないか) =====================
@@ -436,11 +447,33 @@
     $('badge').textContent = stream ? ({ IDLE: '待機中', DETECT: '検出中', RECOGNIZE: '認識中', CHOOSE: '選択待ち', WAIT_REMOVAL: '登録済み', FAILED_WAIT: '失敗' })[state] : '停止中';
     $('guide').className = 'guide s-' + state;
   }
-  function setState(s, text, cls) { state = s; showState(); msg(text !== undefined ? text : STATE_TEXT[s], cls); }
-  function resetScan() { baseline = null; prevGray = null; tickN = 0; isPresent = false; stable = 0; absentN = 0; attempts = 0; pool = []; token++; setState('IDLE'); }
+  const isPhoto = () => CFG.mode !== 'continuous';
+  function setState(s, text, cls) {
+    state = s; showState();
+    if (text === undefined) text = (s === 'IDLE' && isPhoto()) ? (stream ? 'カードを枠に合わせて「撮影して読み取る」を押してください' : 'カメラを開始するか、写真を選んでください') : STATE_TEXT[s];
+    msg(text, cls); syncButtons();
+  }
+  function syncButtons() {
+    $('shutBtn').disabled = !stream || state !== 'IDLE';
+    $('fileBtn').disabled = state === 'RECOGNIZE' || state === 'CHOOSE';
+    if (state === 'IDLE') hideStill();
+  }
+  function showStill(card) {
+    const c = $('still'); c.width = card.width; c.height = card.height; c.getContext('2d').drawImage(card, 0, 0); c.style.objectFit = 'contain'; c.style.display = 'block';
+  }
+  function hideStill() { $('still').style.display = 'none'; }
+  function applyMode() {
+    const ph = isPhoto();
+    $('shutBtn').hidden = !ph; $('baseBtn').hidden = ph;
+    $('modePhoto').className = ph ? '' : 'sub'; $('modeCont').className = ph ? 'sub' : '';
+    clearInterval(loopTimer); loopTimer = null;
+    if (stream && !ph) { resetScan(); loopTimer = setInterval(tick, CFG.interval); }
+    else { token++; hideChoose(); state = 'IDLE'; showState(); setState('IDLE'); }
+  }
+  function resetScan() { hideStill(); baseline = null; prevGray = null; tickN = 0; isPresent = false; stable = 0; absentN = 0; attempts = 0; pool = []; token++; setState('IDLE'); }
 
   function tick() {
-    if (!stream) return;
+    if (!stream || isPhoto()) return;
     const m = sample(); if (!m) return; tickN++;
     // カードがあるかを、ヒステリシス付きで判定(入るとき・出るときで基準を変える)
     const P = CFG.present, A = CFG.absent;
@@ -467,12 +500,14 @@
 
   // ===================== 認識 =====================
   let lastRois = {};
+  let shot = null;     // 撮影した写真(あればこれを読む)
   function captureCard() {
+    if (shot) return shot;
     const c = document.createElement('canvas'); c.width = Math.round(guide.w); c.height = Math.round(guide.h);
     c.getContext('2d').drawImage(video, guide.x, guide.y, guide.w, guide.h, 0, 0, c.width, c.height); return c;
   }
-  async function recognize() {
-    const my = ++token; setState('RECOGNIZE'); attempts++;
+  async function recognize(fixedCard) {
+    const my = ++token; shot = fixedCard || null; if (shot) showStill(shot); setState('RECOGNIZE'); attempts++;
     const rec = { t: new Date().toTimeString().slice(0, 8), attempt: attempts, passes: [], code: '', cost: null, power: null };
     try {
       if (!DB) throw new Error('カード一覧が読み込まれていません');
@@ -487,7 +522,7 @@
         t = await ocr(prep(nameSrc, true, 1200), 6); if (!alive()) return;
         rec.passes.push('名前(反転): ' + t.trim()); list = mergeRanks(list, rankName(t, 'top'));
       }
-      if ((!list.length || list[0].base < CFG.tMid) && attempts >= 2) {
+      if ((!list.length || list[0].base < CFG.tMid) && (attempts >= 2 || isPhoto())) {
         const upper = cropCanvas(card, 0, 0, card.width, card.height * 0.3);
         t = await ocr(prep(upper, false, 1400), 11); if (!alive()) return;
         rec.passes.push('上部全体: ' + t.trim()); list = mergeRanks(list, rankName(t, 'full'));
@@ -513,16 +548,19 @@
       if (!alive()) return;
       if (tier === 'high' && CFG.autoRegister) { register(ranked[0].i, true); }
       else if (tier === 'high' || tier === 'mid') { showChoose(ranked.slice(0, 8), tier === 'high' ? '確認してください(自動登録はオフです)' : '候補が近いです。合っているものを選んでください'); setState('CHOOSE'); }
+      else if (isPhoto()) { setState('IDLE', '読み取れませんでした。明るい場所で、カード名がはっきり写るように撮り直すか、下の欄で名前を入力してください', 'err'); showManualHint(); }
       else if (attempts < CFG.maxAttempts) { rec.retry = true; stable = 0; setState('DETECT', `読み取れませんでした。もう一度読みます(${attempts}/${CFG.maxAttempts})…`); }
       else { setState('FAILED_WAIT', STATE_TEXT.FAILED_WAIT, 'err'); showManualHint(); }
     } catch (e) {
       rec.error = e.message; pushLog(rec);
-      if (my === token) { setState('FAILED_WAIT', '読み取りに失敗しました: ' + e.message, 'err'); }
+      if (my === token) { if (isPhoto()) setState('IDLE', '読み取りに失敗しました: ' + e.message, 'err'); else setState('FAILED_WAIT', '読み取りに失敗しました: ' + e.message, 'err'); }
     }
   }
   function register(i, auto) {
     enqueue(i, +1, auto ? 'カメラ(自動)' : 'カメラ(選択)');
-    hideChoose(); setState('WAIT_REMOVAL', `登録: ${DB.names[i]}(${DB.ids[i]})。カードを外してください`, 'good');
+    hideChoose();
+    if (isPhoto()) setState('IDLE', `登録: ${DB.names[i]}(${DB.ids[i]})。次のカードを撮影できます`, 'good');
+    else setState('WAIT_REMOVAL', `登録: ${DB.names[i]}(${DB.ids[i]})。カードを外してください`, 'good');
     toast(`${DB.names[i]} を +1 しました`, () => { enqueue(i, -1, '取り消し'); });
   }
 
@@ -576,7 +614,7 @@
   $('clearLog').onclick = () => { alog.length = 0; $('alog').textContent = '-'; };
   $('cfgText').value = JSON.stringify(userCfg, null, 2) === '{}' ? '{\n  "tHigh": 0.9\n}' : JSON.stringify(userCfg, null, 2);
   $('cfgSave').onclick = () => {
-    try { const o = JSON.parse($('cfgText').value); userCfg = o; store.set('dmcfg', o); CFG = deepMerge(DEFAULTS, o); $('auto').checked = !!CFG.autoRegister; if (stream) { computeGuide(); clearInterval(loopTimer); loopTimer = setInterval(tick, CFG.interval); } toast('設定を適用しました'); }
+    try { const o = JSON.parse($('cfgText').value); userCfg = o; store.set('dmcfg', o); CFG = deepMerge(DEFAULTS, o); $('auto').checked = !!CFG.autoRegister; if (stream) computeGuide(); applyMode(); toast('設定を適用しました'); }
     catch (e) { toast('JSONの形式が正しくありません'); }
   };
   $('cfgReset').onclick = () => { store.del('dmcfg'); userCfg = {}; CFG = deepMerge(DEFAULTS, {}); $('cfgText').value = '{\n  "tHigh": 0.9\n}'; $('auto').checked = !!CFG.autoRegister; toast('初期値に戻しました'); };
@@ -584,7 +622,35 @@
   // ===================== イベント =====================
   $('camBtn').onclick = () => { if (stream) stopCamera(); else startCamera(); };
   $('baseBtn').onclick = () => { const m = sample(); if (m) { baseline = m.g.slice(); toast('いまの映像を「カードなし」の背景にしました'); } };
-  $('skipBtn').onclick = () => { if (state === 'CHOOSE') { hideChoose(); setState('WAIT_REMOVAL', '登録しませんでした。カードを外してください'); } };
+  $('skipBtn').onclick = () => { if (state === 'CHOOSE') { hideChoose(); if (isPhoto()) setState('IDLE', '登録しませんでした'); else setState('WAIT_REMOVAL', '登録しませんでした。カードを外してください'); } };
+  $('retakeBtn').onclick = () => { if (state === 'CHOOSE') { token++; hideChoose(); setState('IDLE', isPhoto() ? undefined : '登録しませんでした。カードを外してください'); if (!isPhoto()) setState('WAIT_REMOVAL', '登録しませんでした。カードを外してください'); } };
+  $('shutBtn').onclick = () => {
+    if (!stream || state !== 'IDLE' || !isPhoto()) return;
+    if (!DB) { msg('カード一覧がまだ読み込まれていません。接続設定を確認してください', 'err'); return; }
+    const c = document.createElement('canvas'); c.width = Math.round(guide.w); c.height = Math.round(guide.h);
+    c.getContext('2d').drawImage(video, guide.x, guide.y, guide.w, guide.h, 0, 0, c.width, c.height);
+    attempts = 0; pool = []; recognize(c);
+  };
+  // 写真(撮影・アルバム)から読み取る。カードが写真の中央に大きく写っているものを想定し、カードの縦横比で中央を切り出す
+  async function fileToCard(blob) {
+    let bmp;
+    try { bmp = await createImageBitmap(blob, { imageOrientation: 'from-image' }); }
+    catch (e) { bmp = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = URL.createObjectURL(blob); }); }
+    const w = bmp.width, h = bmp.height; let gh = h * CFG.guideH, gw = gh * 63 / 88; if (gw > w * 0.94) { gw = w * 0.94; gh = gw * 88 / 63; }
+    const sc = Math.min(1, 1600 / gh), c = document.createElement('canvas'); c.width = Math.round(gw * sc); c.height = Math.round(gh * sc);
+    c.getContext('2d').drawImage(bmp, (w - gw) / 2, (h - gh) / 2, gw, gh, 0, 0, c.width, c.height); return c;
+  }
+  $('fileBtn').onclick = () => $('fileIn').click();
+  $('fileIn').onchange = async (e) => {
+    const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+    if (!DB) { msg('カード一覧がまだ読み込まれていません。接続設定を確認してください', 'err'); return; }
+    if (state === 'RECOGNIZE' || state === 'CHOOSE') return;
+    try { const c = await fileToCard(f); attempts = 0; pool = []; if (!isPhoto()) { CFG.mode = 'photo'; applyMode(); } recognize(c); }
+    catch (err) { msg('写真を読み込めませんでした: ' + err.message, 'err'); }
+  };
+  function setMode(m) { userCfg.mode = m; store.set('dmcfg', userCfg); CFG.mode = m; $('cfgText').value = JSON.stringify(userCfg, null, 2); applyMode(); }
+  $('modePhoto').onclick = () => { if (state !== 'RECOGNIZE') setMode('photo'); };
+  $('modeCont').onclick = () => { if (state !== 'RECOGNIZE') setMode('continuous'); };
   $('auto').checked = !!CFG.autoRegister;
   $('auto').onchange = () => { userCfg.autoRegister = $('auto').checked; store.set('dmcfg', userCfg); CFG.autoRegister = $('auto').checked; $('cfgText').value = JSON.stringify(userCfg, null, 2); };
   $('gasUrl').value = store.get('gasUrl', ''); $('gasTok').value = store.get('gasTok', '');
@@ -592,9 +658,9 @@
   document.addEventListener('visibilitychange', () => { if (document.hidden && stream) stopCamera(); });
   window.addEventListener('online', () => { if (queue.length) { queue.forEach((q) => { q.tries = 0; }); pump(); } });
 
-  renderJobs();
+  renderJobs(); applyMode();
   loadCards(true).then(() => { if (queue.length) pump(); });
-  window.__app = { get state() { return state; }, get CFG() { return CFG; }, tick, rankName, applyBoosts, classify, mergeRanks, getDB: () => DB, queue: () => queue, done: () => done, alog, startCamera, stopCamera };
+  window.__app = { get state() { return state; }, get CFG() { return CFG; }, tick, rankName, applyBoosts, classify, mergeRanks, getDB: () => DB, queue: () => queue, done: () => done, alog, startCamera, stopCamera, applyMode };
 })();
 </script>
 </body>
