@@ -131,7 +131,7 @@
     maxAttempts: 3,               // 読み取りに失敗したとき、同じカードで何回までやり直すか
     tHigh: 0.9,                   // 高確度: 1位の点数がこれ以上
     margin: 0.12,                 // 高確度: 1位と2位の差がこれ以上
-    tMid: 0.55,                   // これ未満は低確度(登録しない)
+    tMid: 0.35,                   // これ未満は低確度(登録しない)。これ以上〜高確度未満は、候補を出して選んでもらう
     mode: 'photo',                // 'photo' = 撮影ボタンで1枚ずつ / 'continuous' = 連続スキャン
     autoRegister: true,           // 高確度を自動登録するか
     roi: {
@@ -166,10 +166,11 @@
     const n = d.ids.length;
     const db = { n, ids: d.ids, names: d.names, civ: d.civ, cost: d.cost, power: d.power || new Array(n).fill(''), rarity: d.rarity,
       pack: d.pack.map((k) => d.packs[k] || ''), own: d.own.map((x) => Number(x) || 0),
-      nn: new Array(n), bg: new Array(n), prefix: new Array(n), num: new Array(n) };
+      nn: new Array(n), segs: new Array(n), bg: new Array(n), prefix: new Array(n), num: new Array(n) };
     const ps = new Set();
     for (let i = 0; i < n; i++) {
       db.nn[i] = norm(d.names[i]);
+      db.segs[i] = String(d.names[i]).normalize('NFKC').split(/[\s・＆&~～〜]+/).map(norm).filter((x) => x.length >= 3 && x !== db.nn[i]);
       const set = new Set(); for (let k = 0; k < db.nn[i].length - 1; k++) set.add(db.nn[i].substr(k, 2)); db.bg[i] = [...set];
       const [p, rest] = String(d.ids[i]).split('-');
       db.prefix[i] = (p || '').toUpperCase();
@@ -302,19 +303,34 @@
     const out = [];
     for (let i = 0; i < DB.n; i++) {
       const nm = DB.nn[i], L = nm.length; if (L < 1) continue;
-      let d;
+      let d = -1, s = 0, whole = 0, partial = false;
+      // (1) 名前ぜんたいで比べる
       if (T.includes(nm)) d = 0;
-      else if (L < 4) continue;
-      else {
+      else if (L >= 4) {
         let hit = 0; for (const g of DB.bg[i]) if (TB.has(g)) hit++;
-        if (hit / DB.bg[i].length < (full ? 0.5 : 0.3)) continue;
-        const maxD = Math.floor(L * (full ? 0.2 : 0.4)); d = approxDist(nm, T, maxD); if (d > maxD) continue;
+        if (hit / DB.bg[i].length >= (full ? 0.5 : 0.3)) { const maxD = Math.floor(L * (full ? 0.2 : 0.4)); const dd = approxDist(nm, T, maxD); if (dd <= maxD) d = dd; }
       }
-      const sim = 1 - d / L, tf = Math.min(1, L / T.length);
-      if (L <= 3 && tf < 0.5) continue;
-      let s = sim * (0.4 + 0.6 * tf) + (d === 0 && L >= 4 ? 0.07 : 0);
+      if (d >= 0) {
+        const sim = 1 - d / L, tf = Math.min(1, L / T.length);
+        if (!(L <= 3 && tf < 0.5)) { s = sim * (0.4 + 0.6 * tf) + (d === 0 && L >= 4 ? 0.07 : 0); whole = s; }
+      }
+      // (2) 「千羽忍革 ボジソワカ」のような名前の一部分(空白・「・」「＆」で区切った部分)だけ読めたとき。点数は低めにして、自動登録の対象にはしない
+      const segs = DB.segs[i];
+      if (segs && segs.length) {
+        let best = 0;
+        for (const sg of segs) {
+          const sl = sg.length; let dd = -1;
+          if (T.includes(sg)) dd = 0; else if (sl >= 5) { const mx = Math.floor(sl * 0.4), x = approxDist(sg, T, mx); if (x <= mx) dd = x; }
+          if (dd < 0) continue;
+          const ps = (1 - dd / sl) * Math.sqrt(sl / L) * 0.8;
+          if (ps > best) best = ps;
+        }
+        // 名前ぜんたいの手がかりと、一部分の手がかりが両方あれば、足し合わせる
+        if (best > 0) { if (best > whole) { s = best + 0.5 * whole; partial = true; } }
+      }
+      if (s <= 0) continue;
       if (full) s *= 0.55;
-      out.push({ i, s, base: s });
+      out.push({ i, s, base: s, partial });
     }
     out.sort((a, b) => b.s - a.s || a.i - b.i);
     return out.slice(0, POOL);
@@ -344,6 +360,7 @@
     const best = list[0], second = list[1];
     if (!best || best.s < CFG.tMid) return 'low';
     const contradict = best.why && best.why.some((w) => w.includes('不一致'));
+    if (best.partial) return 'mid';                                                  // 名前の一部しか読めていないときは、必ず選んでもらう
     if (best.s >= CFG.tHigh && (!second || best.s - second.s >= CFG.margin) && !contradict) return 'high';
     return 'mid';
   }
@@ -366,6 +383,28 @@
     acc = 0; for (let v = 255; v >= 0; v--) { acc += hist[v]; if (acc >= total * 0.02) { hi = v; break; } }
     const span = Math.max(1, hi - lo);
     for (let i = 0; i < d.length; i += 4) { let y = ((d[i] - lo) * 255) / span; y = y < 0 ? 0 : y > 255 ? 255 : y; if (invert) y = 255 - y; d[i] = d[i + 1] = d[i + 2] = y; d[i + 3] = 255; }
+    g.putImageData(im, 0, 0); return c;
+  }
+  // 局所しきい値による白黒化(絵の上に文字がある場合に、背景と文字を分けやすくする)。invert で白黒を反転
+  function binarize(src, invert, targetW) {
+    const W = targetW, sc = W / src.width, H = Math.max(1, Math.round(src.height * sc));
+    const c = document.createElement('canvas'); c.width = W; c.height = H;
+    const g = c.getContext('2d', { willReadFrequently: true }); g.imageSmoothingQuality = 'high'; g.drawImage(src, 0, 0, W, H);
+    const im = g.getImageData(0, 0, W, H), d = im.data, gray = new Float32Array(W * H);
+    for (let i = 0, k = 0; i < d.length; i += 4, k++) gray[k] = (d[i] * 299 + d[i + 1] * 587 + d[i + 2] * 114) / 1000;
+    const I = new Float64Array((W + 1) * (H + 1));
+    for (let y = 0; y < H; y++) { let row = 0; for (let x = 0; x < W; x++) { row += gray[y * W + x]; I[(y + 1) * (W + 1) + x + 1] = I[y * (W + 1) + x + 1] + row; } }
+    const r = Math.max(8, Math.round(H / 4));
+    for (let y = 0; y < H; y++) {
+      const y0 = Math.max(0, y - r), y1 = Math.min(H, y + r + 1);
+      for (let x = 0; x < W; x++) {
+        const x0 = Math.max(0, x - r * 2), x1 = Math.min(W, x + r * 2 + 1);
+        const sum = I[y1 * (W + 1) + x1] - I[y0 * (W + 1) + x1] - I[y1 * (W + 1) + x0] + I[y0 * (W + 1) + x0];
+        const mean = sum / ((y1 - y0) * (x1 - x0));
+        let v = gray[y * W + x] < mean * 0.9 ? 0 : 255; if (invert) v = 255 - v;
+        const k = (y * W + x) * 4; d[k] = d[k + 1] = d[k + 2] = v; d[k + 3] = 255;
+      }
+    }
     g.putImageData(im, 0, 0); return c;
   }
   let workerP = null;
@@ -522,6 +561,14 @@
         t = await ocr(prep(nameSrc, true, 1200), 6); if (!alive()) return;
         rec.passes.push('名前(反転): ' + t.trim()); list = mergeRanks(list, rankName(t, 'top'));
       }
+      if (isPhoto() && (!list.length || list[0].base < CFG.tHigh)) {
+        t = await ocr(binarize(nameSrc, false, 1200), 6); if (!alive()) return;
+        rec.passes.push('名前(二値化): ' + t.trim()); list = mergeRanks(list, rankName(t, 'top'));
+        if (!list.length || list[0].base < CFG.tHigh) {
+          t = await ocr(binarize(nameSrc, true, 1200), 6); if (!alive()) return;
+          rec.passes.push('名前(二値化・反転): ' + t.trim()); list = mergeRanks(list, rankName(t, 'top'));
+        }
+      }
       if ((!list.length || list[0].base < CFG.tMid) && (attempts >= 2 || isPhoto())) {
         const upper = cropCanvas(card, 0, 0, card.width, card.height * 0.3);
         t = await ocr(prep(upper, false, 1400), 11); if (!alive()) return;
@@ -548,6 +595,7 @@
       if (!alive()) return;
       if (tier === 'high' && CFG.autoRegister) { register(ranked[0].i, true); }
       else if (tier === 'high' || tier === 'mid') { showChoose(ranked.slice(0, 8), tier === 'high' ? '確認してください(自動登録はオフです)' : '候補が近いです。合っているものを選んでください'); setState('CHOOSE'); }
+      else if (isPhoto() && ranked.length && ranked[0].s >= 0.25) { showChoose(ranked.slice(0, 8), '自信がありません。近い候補です。合っているものがあれば選んでください'); setState('CHOOSE'); }
       else if (isPhoto()) { setState('IDLE', '読み取れませんでした。明るい場所で、カード名がはっきり写るように撮り直すか、下の欄で名前を入力してください', 'err'); showManualHint(); }
       else if (attempts < CFG.maxAttempts) { rec.retry = true; stable = 0; setState('DETECT', `読み取れませんでした。もう一度読みます(${attempts}/${CFG.maxAttempts})…`); }
       else { setState('FAILED_WAIT', STATE_TEXT.FAILED_WAIT, 'err'); showManualHint(); }
@@ -660,7 +708,7 @@
 
   renderJobs(); applyMode();
   loadCards(true).then(() => { if (queue.length) pump(); });
-  window.__app = { get state() { return state; }, get CFG() { return CFG; }, tick, rankName, applyBoosts, classify, mergeRanks, getDB: () => DB, queue: () => queue, done: () => done, alog, startCamera, stopCamera, applyMode };
+  window.__app = { get state() { return state; }, get CFG() { return CFG; }, tick, rankName, applyBoosts, classify, mergeRanks, getDB: () => DB, queue: () => queue, done: () => done, alog, startCamera, stopCamera, applyMode, binarize };
 })();
 </script>
 </body>
